@@ -1,150 +1,127 @@
-"""
-source_graphs.py - one line graph per energy source, Greedy vs Brute force
----------------------------------------------------------------------------
-x-axis : total demand (MW), swept from 50 MW up to the total capacity
-y-axis : what that single source is asked to do at that demand
-         (default: MW allocated; or --y cost for $ per hour paid to it)
+"""Plot source allocations/capacities and model cost/emissions comparisons.
 
-Each panel has two lines: Brute force (red) and Greedy (green). Because both
-algorithms give identical values, the lines are nudged apart visually (use
---no-offset for the exact, overlapping values). A dashed grey line marks the
-source's capacity (MW mode), so you can see when it is "full".
-
-Usage:
-    python source_graphs.py                # y = MW allocated
-    python source_graphs.py --y cost       # y = cost contribution ($ per hour)
-    python source_graphs.py --no-show      # save only
+Run ``python -m src.visualize [scenario.json] [--output plot.png] [--no-show]``.
+JSON input uses ``sources`` (records with source/name, capacity_mw/capacity,
+optional cost_per_block/cost and co2_t_per_block/co2) and ``allocations``
+(mapping model names to source->MW mappings). Without input, built-in rich
+model data and a least-cost allocation are plotted.
 """
+from __future__ import annotations
 
 import argparse
+import json
 import os
-import sys
 from pathlib import Path
+from typing import Any, Mapping, Sequence
 
-HERE = Path(__file__).resolve().parent
-for candidate in (HERE, HERE / "src"):
-    if (candidate / "classic.py").exists():
-        sys.path.insert(0, str(candidate))
-        break
+import matplotlib
 
-try:
-    import matplotlib
-except ImportError:
-    sys.exit("matplotlib is not installed. Run: pip install numpy matplotlib")
-
-if (sys.platform.startswith("linux")
-        and not os.environ.get("DISPLAY")
-        and not os.environ.get("WAYLAND_DISPLAY")):
+if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
     matplotlib.use("Agg")
-
-import matplotlib.pyplot as plt  # noqa: E402
-from matplotlib.lines import Line2D  # noqa: E402
-
-try:
-    from classic import SOURCES, DEMAND_MW, greedy_allocate, brute_force_allocate
-except ImportError as exc:
-    sys.exit(f"Could not import classic.py ({exc}). Keep it next to this file.")
-
-OUT_DIR = HERE / "results" / "figures"
-SWEEP_STEP = 50       # brute-force granularity for the sweep (keeps it fast)
-GREEDY_COLOR = "#2ca02c"   # green
-BRUTE_COLOR = "#d62728"    # red
-OFFSET_FRAC = 0.02         # visual nudge, as a fraction of each panel's y-range
-
-TOTAL_CAP = sum(s["capacity"] for s in SOURCES)
-DEMANDS = list(range(SWEEP_STEP, TOTAL_CAP + 1, SWEEP_STEP))
+import matplotlib.pyplot as plt
+import numpy as np
 
 
-def sweep():
-    """Allocation of every source under both algorithms, for every demand."""
-    greedy, brute = [], []
-    for d in DEMANDS:
-        g, _ = greedy_allocate(SOURCES, d)
-        b, _, _ = brute_force_allocate(SOURCES, d, SWEEP_STEP)
-        greedy.append(g)
-        brute.append(b)
-    return greedy, brute
+def plot_allocations(
+    sources: Any,
+    allocations: Mapping[str, Mapping[str, float]],
+    output: str | Path | None = None,
+    show: bool = False,
+):
+    """Build and optionally save/show a figure from source records and allocations.
 
+    Sources may be a sequence of dictionaries or a pandas DataFrame. Allocation
+    values are MW; source records accept rich-model column names or simple aliases.
+    """
+    records = sources.to_dict("records") if hasattr(sources, "to_dict") else list(sources)
+    if not records or not allocations:
+        raise ValueError("At least one source and one allocation are required")
+    names, capacities, costs, emissions = [], [], [], []
+    for row in records:
+        name = row.get("source", row.get("name"))
+        if name is None:
+            raise ValueError("Every source needs a 'source' or 'name'")
+        names.append(str(name))
+        capacities.append(float(row.get("capacity_mw", row.get("capacity", 0))))
+        costs.append(float(row.get("cost_per_block", row.get("cost", 0))))
+        emissions.append(float(row.get("co2_t_per_block", row.get("co2", 0))))
+    if len(set(names)) != len(names) or any(x < 0 for x in capacities):
+        raise ValueError("Source names must be unique and capacities nonnegative")
+    for label, allocation in allocations.items():
+        if any(float(value) < 0 for value in allocation.values()):
+            raise ValueError(f"Allocation '{label}' contains a negative value")
+        unknown = set(allocation) - set(names)
+        if unknown:
+            raise ValueError(f"Allocation '{label}' has unknown sources: {sorted(unknown)}")
 
-def style_axes(ax):
-    for side in ("top", "right", "left", "bottom"):
-        ax.spines[side].set_visible(False)
-    ax.grid(axis="y", color="#e6e6e6", linewidth=1)
+    models = list(allocations)
+    values = np.array([[float(allocations[m].get(n, 0)) for n in names] for m in models])
+    if np.any(values > np.array(capacities)[None, :] + 1e-9):
+        raise ValueError("Allocation exceeds source capacity")
+    total_cost = values @ np.array(costs)
+    total_co2 = values @ np.array(emissions)
+
+    fig, (ax, comparison) = plt.subplots(1, 2, figsize=(11, 4.8), gridspec_kw={"width_ratios": [1.6, 1]})
+    x = np.arange(len(names))
+    width = 0.8 / len(models)
+    for i, (model, row) in enumerate(zip(models, values)):
+        offset = (i - (len(models) - 1) / 2) * width
+        ax.bar(x + offset, row, width, label=model)
+    ax.scatter(x, capacities, marker="_", s=350, color="#222222", label="Capacity", zorder=3)
+    ax.set_xticks(x, names, rotation=25, ha="right")
+    ax.set_ylabel("Power (MW)")
+    ax.set_title("Allocation by source (markers = capacity)")
+    ax.grid(axis="y", alpha=.2)
     ax.set_axisbelow(True)
-    ax.tick_params(axis="both", length=0, colors="#595959", labelsize=9)
+    ax.legend(frameon=False)
+
+    pos = np.arange(len(models))
+    comparison.barh(pos - .18, total_cost, .35, color="#2878a5", label="Cost")
+    comparison.barh(pos + .18, total_co2, .35, color="#e28e2c", label="Emissions")
+    comparison.set_yticks(pos, models)
+    comparison.set_xlabel("Weighted total (units follow source data)")
+    comparison.set_title("Cost and emissions")
+    comparison.legend(frameon=False)
+    comparison.grid(axis="x", alpha=.2)
+    comparison.set_axisbelow(True)
+    fig.tight_layout()
+    if output is not None:
+        fig.savefig(output, dpi=150, bbox_inches="tight")
+    if show:
+        plt.show()
+    return fig
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Per-source greedy vs brute force")
-    parser.add_argument("--y", choices=["mw", "cost"], default="mw")
-    parser.add_argument("--no-offset", action="store_true",
-                        help="draw the true values with no visual separation "
-                             "(the two lines then coincide exactly)")
+def _default_data():
+    try:
+        from .energy_data import DEMAND_MW, build_sources
+    except ImportError:
+        from energy_data import DEMAND_MW, build_sources
+    sources = build_sources()
+    records = sources.to_dict("records")
+    remaining = DEMAND_MW
+    allocation = {}
+    for row in sorted(records, key=lambda r: r["cost_per_block"]):
+        amount = min(float(row["capacity_mw"]), remaining)
+        allocation[row["source"]] = amount
+        remaining -= amount
+    return records, {"Least cost": allocation}
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("input", nargs="?", help="JSON scenario; defaults to rich energy data")
+    parser.add_argument("--output", default="allocation_comparison.png")
     parser.add_argument("--no-show", action="store_true")
-    args = parser.parse_args()
-
-    greedy, brute = sweep()
-    ordered = sorted(SOURCES, key=lambda s: s["cost"])     # merit order
-
-    fig, axes = plt.subplots(2, 2, figsize=(11, 7.5), sharex=True)
-    for ax, s in zip(axes.flat, ordered):
-        n, cost, cap = s["name"], s["cost"], s["capacity"]
-        k = cost if args.y == "cost" else 1                 # $/MWh or 1
-        g_y = [a[n] * k for a in greedy]
-        b_y = [a[n] * k for a in brute]
-
-        # Both algorithms return identical values here, so the lines would sit
-        # exactly on top of each other. Nudge them apart by a few percent of
-        # the panel height so each stays visible (red above, green below).
-        top = max(max(b_y), max(g_y), 1)
-        off = 0 if args.no_offset else OFFSET_FRAC * top
-        ax.plot(DEMANDS, [v + off for v in b_y], color=BRUTE_COLOR, lw=2.4,
-                marker="o", ms=4.5)
-        ax.plot(DEMANDS, [v - off for v in g_y], color=GREEDY_COLOR, lw=2.4,
-                marker="s", ms=4.5)
-        ax.margins(y=0.08)
-        if args.y == "mw":
-            ax.axhline(cap, color="#999999", lw=1, linestyle="--")
-        ax.axvline(DEMAND_MW, color="#bbbbbb", lw=1, linestyle=":")
-        ax.set_title(f"{n}  (${cost}/MWh, cap {cap} MW)", fontsize=12, color="#404040")
-        style_axes(ax)
-
-    ylabel = "Allocated output (MW)" if args.y == "mw" else "Cost paid to source ($ per hour)"
-    for ax in axes[:, 0]:
-        ax.set_ylabel(ylabel, color="#595959", fontsize=9)
-    for ax in axes[1, :]:
-        ax.set_xlabel("Total demand (MW)", color="#595959", fontsize=9)
-
-    handles = [Line2D([0], [0], color=BRUTE_COLOR, lw=2.4, marker="o", ms=5,
-                      label="Brute force (red)"),
-               Line2D([0], [0], color=GREEDY_COLOR, lw=2.4, marker="s", ms=5,
-                      label="Greedy (green)")]
-    if args.y == "mw":
-        handles.append(Line2D([0], [0], color="#999999", lw=1, linestyle="--",
-                              label="Capacity"))
-    handles.append(Line2D([0], [0], color="#bbbbbb", lw=1, linestyle=":",
-                          label=f"Demand = {DEMAND_MW} MW"))
-    fig.legend(handles=handles, loc="lower center", bbox_to_anchor=(0.5, 0.03),
-               ncol=len(handles), frameon=False)
-    fig.suptitle("Each source: Greedy vs Brute force as demand grows",
-                 fontsize=15, color="#404040")
-    if not args.no_offset:
-        fig.text(0.5, 0.008, "Lines are offset by +/-2% of panel height so both stay "
-                 "visible; the true values are identical (run with --no-offset "
-                 "to see them exactly).", ha="center", va="bottom",
-                 fontsize=8, color="#777777")
-    fig.tight_layout(rect=(0, 0.08, 1, 0.96))
-
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    path = OUT_DIR / f"source_graphs_{args.y}.png"
-    fig.savefig(path, dpi=150, facecolor="white")
-    print(f"Saved figure to: {path}")
-
-    if not args.no_show and matplotlib.get_backend().lower() != "agg":
-        try:
-            plt.show()
-        except Exception as exc:
-            print(f"Could not open a window ({exc}); open the PNG instead.")
+    args = parser.parse_args(argv)
+    if args.input:
+        with open(args.input, encoding="utf-8") as stream:
+            payload = json.load(stream)
+        sources, allocations = payload["sources"], payload["allocations"]
+    else:
+        sources, allocations = _default_data()
+    plot_allocations(sources, allocations, args.output, show=not args.no_show)
+    print(f"Saved figure to: {args.output}")
 
 
 if __name__ == "__main__":
