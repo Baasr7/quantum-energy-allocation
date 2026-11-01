@@ -36,7 +36,7 @@ def plot_allocations(
     records = sources.to_dict("records") if hasattr(sources, "to_dict") else list(sources)
     if not records or not allocations:
         raise ValueError("At least one source and one allocation are required")
-    names, capacities, costs, emissions = [], [], [], []
+    names, capacities, costs, emissions, block_sizes = [], [], [], [], []
     for row in records:
         name = row.get("source", row.get("name"))
         if name is None:
@@ -45,6 +45,7 @@ def plot_allocations(
         capacities.append(float(row.get("capacity_mw", row.get("capacity", 0))))
         costs.append(float(row.get("cost_per_block", row.get("cost", 0))))
         emissions.append(float(row.get("co2_t_per_block", row.get("co2", 0))))
+        block_sizes.append(float(row.get("mw_per_block", 10)))
     if len(set(names)) != len(names) or any(x < 0 for x in capacities):
         raise ValueError("Source names must be unique and capacities nonnegative")
     for label, allocation in allocations.items():
@@ -58,10 +59,11 @@ def plot_allocations(
     values = np.array([[float(allocations[m].get(n, 0)) for n in names] for m in models])
     if np.any(values > np.array(capacities)[None, :] + 1e-9):
         raise ValueError("Allocation exceeds source capacity")
-    total_cost = values @ np.array(costs)
-    total_co2 = values @ np.array(emissions)
+    block_values = values / np.array(block_sizes)[None, :]
+    total_cost = block_values @ np.array(costs)
+    total_co2 = block_values @ np.array(emissions)
 
-    fig, (ax, comparison) = plt.subplots(1, 2, figsize=(11, 4.8), gridspec_kw={"width_ratios": [1.6, 1]})
+    fig, (ax, cost_ax, co2_ax) = plt.subplots(1, 3, figsize=(13, 4.8), gridspec_kw={"width_ratios": [1.6, 1, 1]})
     x = np.arange(len(names))
     width = 0.8 / len(models)
     for i, (model, row) in enumerate(zip(models, values)):
@@ -76,14 +78,18 @@ def plot_allocations(
     ax.legend(frameon=False)
 
     pos = np.arange(len(models))
-    comparison.barh(pos - .18, total_cost, .35, color="#2878a5", label="Cost")
-    comparison.barh(pos + .18, total_co2, .35, color="#e28e2c", label="Emissions")
-    comparison.set_yticks(pos, models)
-    comparison.set_xlabel("Weighted total (units follow source data)")
-    comparison.set_title("Cost and emissions")
-    comparison.legend(frameon=False)
-    comparison.grid(axis="x", alpha=.2)
-    comparison.set_axisbelow(True)
+    cost_ax.barh(pos, total_cost, color="#2878a5")
+    cost_ax.set_yticks(pos, models)
+    cost_ax.set_xlabel("Modeled cost")
+    cost_ax.set_title("Cost (Rs thousand/hour)")
+    cost_ax.grid(axis="x", alpha=.2)
+    cost_ax.set_axisbelow(True)
+    co2_ax.barh(pos, total_co2, color="#e28e2c")
+    co2_ax.set_yticks(pos, models)
+    co2_ax.set_xlabel("Modeled emissions")
+    co2_ax.set_title("CO2 (tonnes/hour)")
+    co2_ax.grid(axis="x", alpha=.2)
+    co2_ax.set_axisbelow(True)
     fig.tight_layout()
     if output is not None:
         fig.savefig(output, dpi=150, bbox_inches="tight")
@@ -117,7 +123,19 @@ def main(argv: Sequence[str] | None = None) -> None:
     if args.input:
         with open(args.input, encoding="utf-8") as stream:
             payload = json.load(stream)
-        sources, allocations = payload["sources"], payload["allocations"]
+        sources = payload["sources"]
+        allocations = payload.get("allocations")
+        if allocations is None:
+            demand = float(payload["demand_mw"])
+            allocation, remaining = {}, demand
+            for row in sorted(sources, key=lambda item: item.get("cost_per_block", item.get("cost", 0))):
+                name = row.get("source", row.get("name"))
+                amount = min(float(row.get("capacity_mw", row.get("capacity", 0))), remaining)
+                allocation[name] = amount
+                remaining -= amount
+            if remaining > 0:
+                raise ValueError("Scenario demand exceeds total source capacity")
+            allocations = {"Least-cost": allocation}
     else:
         sources, allocations = _default_data()
     plot_allocations(sources, allocations, args.output, show=not args.no_show)

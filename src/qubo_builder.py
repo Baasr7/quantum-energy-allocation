@@ -10,7 +10,10 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-import energy_data as ed
+try:
+    from . import energy_data as ed
+except ImportError:  # support running modules directly from the src directory
+    import energy_data as ed
 
 
 @dataclass
