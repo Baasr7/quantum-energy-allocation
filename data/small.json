@@ -1,0 +1,9 @@
+{
+  "description": "Tiny illustrative allocation case (10 MW blocks)",
+  "demand_mw": 20,
+  "sources": [
+    {"name": "solar", "capacity_mw": 20, "cost_per_block": 5.0, "co2_t_per_block": 0.04},
+    {"name": "wind", "capacity_mw": 20, "cost_per_block": 8.0, "co2_t_per_block": 0.01},
+    {"name": "gas", "capacity_mw": 20, "cost_per_block": 65.0, "co2_t_per_block": 0.45}
+  ]
+}

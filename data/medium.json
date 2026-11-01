@@ -1,0 +1,11 @@
+{
+  "description": "Illustrative medium allocation case (10 MW blocks)",
+  "demand_mw": 100,
+  "sources": [
+    {"name": "solar", "capacity_mw": 30, "cost_per_block": 18.0, "co2_t_per_block": 0.04},
+    {"name": "wind", "capacity_mw": 30, "cost_per_block": 22.0, "co2_t_per_block": 0.01},
+    {"name": "hydro", "capacity_mw": 20, "cost_per_block": 26.0, "co2_t_per_block": 0.024},
+    {"name": "coal", "capacity_mw": 30, "cost_per_block": 40.0, "co2_t_per_block": 0.95},
+    {"name": "gas", "capacity_mw": 20, "cost_per_block": 65.0, "co2_t_per_block": 0.45}
+  ]
+}
