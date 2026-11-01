@@ -49,7 +49,9 @@ def solve_qaoa(
     """Optimize QAOA angles and sample bitstrings. Returns best observed sample and diagnostics.
 
     Returned bitstrings use QUBO column order (bit i is qubit i), not Qiskit's
-    displayed reversed order. If SciPy is absent, a seeded deterministic search is used.
+    displayed reversed order. If no measured sample meets the exact demand, a
+    seeded classical bit-flip repair enforces the fixed-block constraint.
+    If SciPy is absent, a seeded deterministic search is used.
     """
     if not isinstance(p, (int, np.integer)) or p <= 0:
         raise ValueError("p must be a positive integer")
@@ -84,14 +86,30 @@ def solve_qaoa(
     probabilities /= probabilities.sum()
     counts = rng.multinomial(shots, probabilities)
     sampled = np.flatnonzero(counts)
-    best_index = int(sampled[np.argmin(energies[sampled])])
-    bitstring = "".join(str(int(bit)) for bit in qb.all_patterns(qubo.n)[best_index])
-    bits = qb.all_patterns(qubo.n)[best_index]
+    patterns = qb.all_patterns(qubo.n)
+    sampled_feasible = sampled[patterns[sampled].sum(axis=1) == qubo.demand_blocks]
+    if len(sampled_feasible):
+        best_index = int(sampled_feasible[np.argmin(energies[sampled_feasible])])
+        bits = patterns[best_index].copy()
+        repaired = False
+    else:
+        best_index = int(sampled[np.argmin(energies[sampled])])
+        bits = patterns[best_index].copy()
+        selected = np.flatnonzero(bits)
+        unselected = np.flatnonzero(1 - bits)
+        if len(selected) < qubo.demand_blocks:
+            add = rng.choice(unselected, qubo.demand_blocks - len(selected), replace=False)
+            bits[add] = 1
+        elif len(selected) > qubo.demand_blocks:
+            remove = rng.choice(selected, len(selected) - qubo.demand_blocks, replace=False)
+            bits[remove] = 0
+        repaired = True
+    bitstring = "".join(str(int(bit)) for bit in bits)
     allocation = qb.describe(qubo, bits)
     return {
         "bitstring": bitstring,
         "allocation": allocation,
-        "energy": float(energies[best_index]),
+        "energy": float(qb.score(qubo, bits)[0]),
         "angles": angles.tolist(),
         "diagnostics": {
             "simulation": "classical statevector; no quantum advantage",
@@ -99,5 +117,7 @@ def solve_qaoa(
             "optimizer": method, "optimizer_success": optimizer_success,
             "iterations": iterations, "expected_energy": optimized_expectation,
             "sampled_unique": int(len(sampled)),
+            "feasible_samples": int(len(sampled_feasible)),
+            "feasibility_repair_applied": repaired,
         },
     }
