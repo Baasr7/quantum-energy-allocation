@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import itertools
+import json
 import sys
 from pathlib import Path
 
@@ -92,6 +93,7 @@ def main():
     parser.add_argument("--shots", type=int, default=1024, help="QAOA simulation samples")
     parser.add_argument("--maxiter", type=int, default=100, help="QAOA parameter-search iterations")
     parser.add_argument("--plot", metavar="PATH", help="save allocation/cost/emissions comparison plot")
+    parser.add_argument("--json-output", metavar="PATH", help="write solver allocations and summary stats as JSON")
     args = parser.parse_args()
 
     sources, scenario_demand, block_mw = load_scenario(args.data, args.scenario)
@@ -112,12 +114,36 @@ def main():
     cost_gap = 100 * (qaoa_cost - exact_cost) / exact_cost if exact_cost else 0.0
     print(f"QAOA vs brute-force cost gap: {cost_gap:+.1f}% | emissions difference: {qaoa_co2 - exact_co2:+.3f} tonnes/hour")
     print(f"QAOA diagnostics: {qaoa['diagnostics']}")
+
+    def to_mw(bits):
+        return {name: int(blocks * block_mw) for name, blocks in qb.describe(q, bits).items()}
+
+    if args.json_output:
+        methods = {}
+        for name, bits in (("Greedy", greedy), ("Brute force", optimum),
+                           ("QAOA sample", qaoa_bits)):
+            methods[name] = {
+                "allocation_mw": to_mw(bits),
+                "cost_per_hour": float(qb.real_cost(q, bits)[0]),
+                "co2_tonnes_per_hour": float(qb.real_co2(q, bits)[0]),
+                "feasible": sum(qb.describe(q, bits).values()) * block_mw == demand_mw,
+            }
+        destination = Path(args.json_output)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with destination.open("w", encoding="utf-8") as stream:
+            json.dump({
+                "scenario": args.scenario,
+                "demand_mw": demand_mw,
+                "mw_per_block": block_mw,
+                "qubits": q.n,
+                "qaoa_cost_gap_pct": cost_gap,
+                "qaoa_diagnostics": qaoa["diagnostics"],
+                "methods": methods,
+            }, stream, indent=2)
+        print(f"Saved solver results: {destination}")
+
     if args.plot:
         from visualize import plot_allocations
-
-        def to_mw(bits):
-            return {name: blocks * block_mw for name, blocks in qb.describe(q, bits).items()}
-
         plot_allocations(sources, {
             "Greedy": to_mw(greedy),
             "Brute force": to_mw(optimum),
